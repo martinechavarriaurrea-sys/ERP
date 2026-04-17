@@ -15,3 +15,5 @@ Abre `index.html` en el navegador.
 5. Output Directory: vacío.
 
 Vercel servirá `index.html` como sitio estático.
+
+Integración GitHub-Vercel activa en la rama `main`.
