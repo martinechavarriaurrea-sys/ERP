@@ -2912,7 +2912,8 @@
       }
 
       ensureMonthSnapshot();
-      commitState(editId ? 'Deuda actualizada' : 'Deuda creada');
+      const msg = editId ? `Deuda actualizada: ${payload.acreedor} ${money(payload.saldo)}` : 'Deuda creada';
+      commitState(msg);
       closeModal();
     }
 
