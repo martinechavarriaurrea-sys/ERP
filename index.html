@@ -1347,7 +1347,7 @@
           });
         }
 
-        if (cloudState && stateHasContent(cloudState) && !local.hasContent) {
+        if (cloudState && stateHasContent(cloudState) && (options.initial || !local.hasContent)) {
           useCloud = true;
         } else if (cloudState && !stateHasContent(cloudState) && local.hasContent) {
           shouldPushLocal = true;
