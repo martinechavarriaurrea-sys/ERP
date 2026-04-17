@@ -1203,6 +1203,7 @@
       migrateLegacyStorageForUser(profile.id);
       state = loadState();
       ensureStateCollections();
+      const saldosApplied = applyMartinRequestedBalances();
       ui.route = 'dashboard';
       ui.acResult = null;
       if (!setupHasContent()) {
@@ -1211,6 +1212,7 @@
         ensureMonthSnapshot();
         renderShell();
       }
+      if (saldosApplied) showToast('Saldos aplicados: Lulo $440.000 y Bancolombia $798.000');
       return true;
     }
 
@@ -1224,6 +1226,40 @@
       ui.acResult = null;
       closeModal();
       renderAuth();
+    }
+
+    function applyMartinRequestedBalances() {
+      if (activeUserId !== 'martin') return false;
+      state.config = state.config || {};
+      if (state.config.__saldos_fix_20260416) return false;
+      if (!Array.isArray(state.cuentas) || !state.cuentas.length) return false;
+
+      let changed = false;
+      let foundAny = false;
+
+      state.cuentas.forEach((cuenta) => {
+        const nombre = String(cuenta?.nombre || '').toLowerCase();
+        if (nombre.includes('lulo')) {
+          foundAny = true;
+          if (toNumber(cuenta.saldo) !== 440000) {
+            cuenta.saldo = 440000;
+            changed = true;
+          }
+        }
+        if (nombre.includes('bancolombia')) {
+          foundAny = true;
+          if (toNumber(cuenta.saldo) !== 798000) {
+            cuenta.saldo = 798000;
+            changed = true;
+          }
+        }
+      });
+
+      if (foundAny) {
+        state.config.__saldos_fix_20260416 = true;
+        persistState();
+      }
+      return changed;
     }
 
     function renderSetup() {
@@ -2765,12 +2801,19 @@
 
       if (editId) {
         const idx = state.cuentas.findIndex((c) => String(c.id) === editId);
-        if (idx >= 0) state.cuentas[idx] = payload;
+        if (idx < 0) {
+          showToast('Cuenta no encontrada.', 'err');
+          closeModal();
+          return;
+        }
+        payload.id = state.cuentas[idx].id;
+        state.cuentas[idx] = payload;
       } else {
         state.cuentas.push(payload);
       }
 
-      commitState(editId ? 'Cuenta actualizada' : 'Cuenta creada');
+      const msg = editId ? `Cuenta actualizada: ${payload.nombre} ${money(payload.saldo)}` : 'Cuenta creada';
+      commitState(msg);
       closeModal();
     }
 
