@@ -61,6 +61,31 @@ module.exports = async function handler(req, res) {
       try { body = JSON.parse(body); } catch { return sendJson(res, 400, { error: 'Invalid body' }); }
     }
     if (!body || typeof body !== 'object') return sendJson(res, 400, { error: 'Invalid body' });
+
+    // Guard: reject pushes that would lose data compared to what's already in GitHub
+    try {
+      const current = await getCurrentFile(url, headers);
+      if (current?.content) {
+        const existingRaw = Buffer.from(current.content.replace(/\s/g, ''), 'base64').toString('utf-8');
+        const existing = JSON.parse(existingRaw);
+        const existingState = typeof existing.data === 'string' ? JSON.parse(existing.data) : existing;
+        const newContent = body.content ? Buffer.from(body.content.replace(/\s/g, ''), 'base64').toString('utf-8') : null;
+        if (newContent) {
+          const newWrapper = JSON.parse(newContent);
+          const newState = typeof newWrapper.data === 'string' ? JSON.parse(newWrapper.data) : newWrapper;
+          const existingScore = (existingState.deudas?.length || 0) + (existingState.cobrar?.length || 0) + (existingState.movimientos?.length || 0);
+          const newScore = (newState.deudas?.length || 0) + (newState.cobrar?.length || 0) + (newState.movimientos?.length || 0);
+          if (existingScore > 0 && newScore < existingScore * 0.5) {
+            console.error('[sync][GUARD] Rejected data-loss push', { userId, existingScore, newScore });
+            return sendJson(res, 409, { error: 'Push rejected: would lose data', existingScore, newScore });
+          }
+        }
+        if (!body.sha && current.sha) body.sha = current.sha;
+      }
+    } catch (error) {
+      console.error('[sync][GUARD] Error reading current file', { userId, message: String(error?.message || error) });
+    }
+
     const payload = { branch: GH_BRANCH, ...body };
     if (!payload.sha) {
       try {
