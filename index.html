@@ -1270,6 +1270,7 @@
 
     async function flushGhSave(options = {}) {
       if (!activeUserId || !activeStorageKey) return false;
+      if (!_ghQueuedSave && !_ghSaveInFlight) return false;
       const local = readStoredState();
       if (!local.ts) return false;
       ghBeaconSave(activeUserId, local.ts, local.state);
