@@ -2591,12 +2591,12 @@
           <div class="form-grid">
             <div class="field"><label>Deudor</label><input value="${escapeHtml(c.deudor)}" name="deudor" /></div>
             <div class="field"><label>Monto</label><input value="${escapeHtml(c.monto)}" name="monto" type="text" /></div>
-            <div class="field"><label>Cuenta destino</label><select name="cuenta_id">${accountOptions(c.cuenta_id || '')}</select></div>
+            <div class="field"><label>¿A qué cuenta quieres enviar este dinero?</label><select name="cuenta_id">${accountOptions(c.cuenta_id || '')}</select></div>
             <div class="field"><label>Fecha cobro</label><input name="fecha_cobro" type="date" value="${todayISO()}" /></div>
             <div class="field" style="grid-column:1/-1"><label>Notas</label><textarea name="notas">${escapeHtml(c.notas || '')}</textarea></div>
           </div>
           <div class="row" style="margin-top:12px">
-            <span class="tiny muted">Se creará un ingreso automático</span>
+            <span class="tiny muted">Se creará un ingreso automático en la cuenta seleccionada</span>
             <button class="btn grn" type="submit">Confirmar cobro</button>
           </div>
         </form>
@@ -2628,17 +2628,21 @@
     function openAbonoModal(id) {
       const d = getDebtById(id);
       if (!d) return;
+      if (!state.cuentas.length) {
+        showToast('Primero crea una cuenta desde la cual pagar la deuda.', 'warn');
+        return;
+      }
       openModal(`Abono rápido · ${d.acreedor}`, `
         <form id="abono-form">
           <input type="hidden" name="deuda_id" value="${escapeHtml(d.id)}" />
           <div class="form-grid">
             <div class="field"><label>Monto</label><input name="monto" type="text" /></div>
             <div class="field"><label>Fecha</label><input name="fecha" type="date" value="${todayISO()}" /></div>
-            <div class="field"><label>Cuenta origen</label><select name="cuenta_id">${accountOptions('')}</select></div>
+            <div class="field"><label>¿Desde qué cuenta quieres pagar esta deuda?</label><select name="cuenta_id">${accountOptions('')}</select></div>
             <div class="field"><label>Notas</label><input name="notas" value="" /></div>
           </div>
           <div class="row" style="margin-top:12px">
-            <span class="tiny muted">Se registra como pago deuda</span>
+            <span class="tiny muted">Se registrará pago de deuda y se descontará de la cuenta seleccionada</span>
             <button class="btn amb" type="submit">Registrar abono</button>
           </div>
         </form>
@@ -2944,7 +2948,8 @@
         showToast('No se pudo registrar el cobro.', 'err');
         return;
       }
-      commitState('Cobro registrado');
+      const cuentaDestino = accountName(c.cuenta_id);
+      commitState(`Cobro registrado en ${cuentaDestino}`);
       closeModal();
     }
 
@@ -3020,7 +3025,8 @@
       }
       state.movimientos.push(movement);
       applyMovementEffect(movement, 1);
-      commitState('Abono registrado');
+      const cuentaOrigen = accountName(movement.cuenta_id);
+      commitState(`Abono registrado desde ${cuentaOrigen}`);
       closeModal();
     }
 
