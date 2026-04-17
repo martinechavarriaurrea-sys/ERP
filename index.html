@@ -566,15 +566,8 @@
   (() => {
     'use strict';
 
-    // Repo de GitHub donde se guardan los datos (un JSON por usuario)
-    const GH_OWNER = 'martinechavarriaurrea-sys';
-    const GH_REPO  = 'ERP';
-    const GH_BRANCH = 'main';
-    const GH_TOKEN_LSKEY = 'erp_gh_token';
     const _ghSha = {}; // caché de SHA por userId (necesario para updates en GitHub API)
     let _ghSaveTimer = null;
-
-    function ghToken() { return localStorage.getItem(GH_TOKEN_LSKEY) || ''; }
 
     const STORAGE_BASE_KEY = 'erp_martin_abril2026';
     const SESSION_USER_KEY = `${STORAGE_BASE_KEY}__session_user`;
@@ -1035,31 +1028,17 @@
       localStorage.setItem(activeStorageKey, JSON.stringify(state));
       localStorage.setItem(activeStorageKey + '__ts', now);
       lastSavedAt = now;
-      if (ghToken() && activeUserId) {
+      if (activeUserId) {
         clearTimeout(_ghSaveTimer);
         _ghSaveTimer = setTimeout(() => ghSave(activeUserId, now), 4000);
       }
     }
 
-    function ghHeaders() {
-      return {
-        'Authorization': `Bearer ${ghToken()}`,
-        'Accept': 'application/vnd.github+json',
-        'Content-Type': 'application/json',
-        'X-GitHub-Api-Version': '2022-11-28'
-      };
-    }
-
-    function ghPath(userId) {
-      return `https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/contents/data/${userId}.json`;
-    }
-
     async function ghLoad(userId) {
-      if (!ghToken()) return null;
       try {
-        const resp = await fetch(`${ghPath(userId)}?ref=${GH_BRANCH}`, { headers: ghHeaders() });
+        const resp = await fetch(`/api/sync?userId=${userId}`);
         if (resp.status === 404) return null;
-        if (!resp.ok) throw new Error(`GitHub ${resp.status}`);
+        if (!resp.ok) throw new Error(`sync ${resp.status}`);
         const file = await resp.json();
         _ghSha[userId] = file.sha;
         return JSON.parse(decodeURIComponent(escape(atob(file.content.replace(/\n/g, '')))));
@@ -1070,25 +1049,24 @@
     }
 
     async function ghSave(userId, timestamp) {
-      if (!ghToken() || !userId) return;
+      if (!userId) return;
       const payload = { data: JSON.stringify(state), saved_at: timestamp || new Date().toISOString() };
       const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(payload))));
-      const body = {
-        message: `erp: sync ${userId}`,
-        content: encoded,
-        branch: GH_BRANCH
-      };
+      const body = { message: `erp: sync ${userId}`, content: encoded };
       if (_ghSha[userId]) body.sha = _ghSha[userId];
       try {
-        const resp = await fetch(ghPath(userId), { method: 'PUT', headers: ghHeaders(), body: JSON.stringify(body) });
+        const resp = await fetch(`/api/sync?userId=${userId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
         if (resp.status === 409 || resp.status === 422) {
-          // SHA desactualizado — obtener el nuevo SHA y reintentar
           delete _ghSha[userId];
           const current = await ghLoad(userId);
           if (current) await ghSave(userId, timestamp);
           return;
         }
-        if (!resp.ok) throw new Error(`GitHub ${resp.status}`);
+        if (!resp.ok) throw new Error(`sync ${resp.status}`);
         const result = await resp.json();
         if (result.content?.sha) _ghSha[userId] = result.content.sha;
       } catch (e) {
@@ -1097,7 +1075,7 @@
     }
 
     async function ghSync(userId) {
-      if (!ghToken() || !userId || !activeStorageKey) return;
+      if (!userId || !activeStorageKey) return;
       try {
         const cloud = await ghLoad(userId);
         if (!cloud) {
@@ -2382,31 +2360,11 @@
 
         <section class="panel" style="margin-top:12px">
           <h3 class="section-title">Sincronización GitHub</h3>
-          ${ghToken()
-            ? `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
-                <span style="width:9px;height:9px;border-radius:50%;background:var(--grn);display:inline-block;box-shadow:0 0 8px var(--grn)"></span>
-                <span class="tiny" style="color:var(--grn)">Token activo — datos guardados en GitHub automáticamente</span>
-              </div>
-              <div style="display:flex;gap:8px;flex-wrap:wrap">
-                <button class="btn blu" data-action="gh-sync-now" type="button">Sincronizar ahora</button>
-                <button class="btn ghost" data-action="gh-remove-token" type="button">Quitar token</button>
-              </div>`
-            : `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
-                <span style="width:9px;height:9px;border-radius:50%;background:var(--amb);display:inline-block"></span>
-                <span class="tiny" style="color:var(--amb)">Sin token — datos solo en este navegador</span>
-              </div>
-              <div class="tiny muted" style="margin-bottom:10px;line-height:1.6">
-                Pega un <b>Personal Access Token</b> de GitHub con permiso <b>Contents: Read and write</b> sobre el repo ERP.<br>
-                Crea uno en: github.com → Settings → Developer settings → Fine-grained tokens
-              </div>
-              <form id="gh-token-form" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
-                <div class="field" style="flex:1;min-width:220px;margin:0">
-                  <label>Token de GitHub</label>
-                  <input id="gh-token-input" type="password" placeholder="github_pat_..." autocomplete="off" />
-                </div>
-                <button class="btn grn" type="submit">Guardar token</button>
-              </form>`
-          }
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+            <span style="width:9px;height:9px;border-radius:50%;background:var(--grn);display:inline-block;box-shadow:0 0 8px var(--grn)"></span>
+            <span class="tiny" style="color:var(--grn)">Activo — datos guardados en GitHub automáticamente</span>
+          </div>
+          <button class="btn blu" data-action="gh-sync-now" type="button">Sincronizar ahora</button>
         </section>
 
         <section class="panel" style="margin-top:12px">
@@ -3352,7 +3310,6 @@
       }
 
       if (action === 'gh-sync-now' && activeUserId) { ghSync(activeUserId); showToast('Sincronizando con GitHub...'); }
-      if (action === 'gh-remove-token') { localStorage.removeItem(GH_TOKEN_LSKEY); renderShell(); showToast('Token eliminado'); }
       if (action === 'export-json') exportStateJson();
       if (action === 'trigger-import') {
         const input = document.getElementById('import-json-input');
@@ -3493,15 +3450,6 @@
         if (form.id === 'projection-form') saveProjectionForm(form);
         if (form.id === 'acumulado-form') saveAcumuladoForm(form);
         if (form.id === 'config-form') saveConfigForm(form);
-        if (form.id === 'gh-token-form') {
-          const token = (document.getElementById('gh-token-input')?.value || '').trim();
-          if (token) {
-            localStorage.setItem(GH_TOKEN_LSKEY, token);
-            renderShell();
-            showToast('Token guardado — sincronizando...');
-            ghSync(activeUserId);
-          }
-        }
       } catch (err) {
         console.error(err);
         showToast('Error al guardar. Intenta de nuevo.', 'err');
