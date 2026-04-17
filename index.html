@@ -1365,7 +1365,7 @@
 
         const saldosApplied = applyMartinRequestedBalances();
         const snapshotAdjusted = ensureMonthSnapshot({ persist: false });
-        const needsRemoteSave = shouldPushLocal || saldosApplied || snapshotAdjusted;
+        const needsRemoteSave = !options.initial && (shouldPushLocal || saldosApplied || snapshotAdjusted);
         const resolvedTs = needsRemoteSave
           ? new Date().toISOString()
           : (useCloud ? (cloudTs || local.ts || new Date().toISOString()) : (local.ts || cloudTs || new Date().toISOString()));
