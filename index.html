@@ -1141,6 +1141,22 @@
       modalBody.innerHTML = '';
     }
 
+    function bindModalForm(formId, submitHandler) {
+      const form = modalBody.querySelector(`#${formId}`);
+      if (!form) return null;
+      form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        try {
+          submitHandler(form);
+        } catch (err) {
+          console.error(err);
+          showToast('Error al guardar. Intenta de nuevo.', 'err');
+        }
+      });
+      return form;
+    }
+
     function routeLabel(routeId) {
       return ROUTES.find((r) => r.id === routeId)?.label || '';
     }
@@ -2529,6 +2545,7 @@
           </div>
         </form>
       `);
+      bindModalForm('movement-edit-form', saveMovementEdit);
     }
 
     function openCuentaModal(id = '') {
@@ -2550,6 +2567,7 @@
           </div>
         </form>
       `);
+      bindModalForm('cuenta-form', saveCuentaForm);
     }
 
     function openCobrarModal(id = '') {
@@ -2576,6 +2594,7 @@
           </div>
         </form>
       `);
+      bindModalForm('cobrar-form', saveCobrarForm);
     }
 
     function openCobrarDepositoModal(id) {
@@ -2601,6 +2620,7 @@
           </div>
         </form>
       `);
+      bindModalForm('cobrar-deposit-form', saveCobrarDepositForm);
     }
 
     function openDeudaModal(id = '') {
@@ -2623,6 +2643,7 @@
           </div>
         </form>
       `);
+      bindModalForm('deuda-form', saveDeudaForm);
     }
 
     function openAbonoModal(id) {
@@ -2647,6 +2668,7 @@
           </div>
         </form>
       `);
+      bindModalForm('abono-form', saveAbonoForm);
     }
 
     function movementToCsv(rows) {
