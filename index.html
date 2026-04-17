@@ -568,6 +568,7 @@
 
     const STORAGE_BASE_KEY = 'erp_martin_abril2026';
     const SESSION_USER_KEY = `${STORAGE_BASE_KEY}__session_user`;
+    const LAST_USER_KEY = `${STORAGE_BASE_KEY}__last_user`;
     const LEGACY_STORAGE_KEYS = ['erp_martin_abril2026', 'erp_v1', 'erp_v1_u1', 'erp_v1_u2', 'erp_personal_v1'];
     const USER_PROFILES = {
       martin: { id: 'martin', name: 'MARTIN', code: '1017924435', key: `${STORAGE_BASE_KEY}__martin` },
@@ -1200,6 +1201,7 @@
       const profile = getUserProfile(userId);
       if (!profile) return false;
       if (persistSession) sessionStorage.setItem(SESSION_USER_KEY, profile.id);
+      localStorage.setItem(LAST_USER_KEY, profile.id);
       activeUserId = profile.id;
       activeStorageKey = profile.key;
       migrateLegacyStorageForUser(profile.id);
@@ -1221,6 +1223,7 @@
     function switchUser() {
       persistState();
       sessionStorage.removeItem(SESSION_USER_KEY);
+      localStorage.removeItem(LAST_USER_KEY);
       activeUserId = '';
       activeStorageKey = '';
       state = defaultState();
@@ -3204,6 +3207,15 @@
     }
 
     function onClick(event) {
+      const submitControl = event.target.closest('button[type="submit"],input[type="submit"]');
+      if (submitControl) {
+        const form = submitControl.form || submitControl.closest('form');
+        if (form && typeof form.requestSubmit === 'function') {
+          event.preventDefault();
+          form.requestSubmit(submitControl);
+          return;
+        }
+      }
       const routeBtn = event.target.closest('[data-route]');
       if (routeBtn) {
         setRoute(routeBtn.getAttribute('data-route'));
@@ -3318,6 +3330,18 @@
     function onKeyDown(event) {
       if (event.key === 'Escape') {
         if (modalOverlay.classList.contains('show')) closeModal();
+        return;
+      }
+      if (event.key === 'Enter' && !event.shiftKey) {
+        const target = event.target;
+        if (!(target instanceof HTMLElement)) return;
+        const tag = target.tagName.toLowerCase();
+        if (tag === 'textarea') return;
+        const form = target.closest('form');
+        if (form && typeof form.requestSubmit === 'function') {
+          event.preventDefault();
+          form.requestSubmit();
+        }
       }
     }
 
@@ -3345,9 +3369,9 @@
       }
     });
 
-    const sessionUser = String(sessionStorage.getItem(SESSION_USER_KEY) || '').trim().toLowerCase();
-    if (getUserProfile(sessionUser)) {
-      activateUser(sessionUser, false);
+    const rememberedUser = String(sessionStorage.getItem(SESSION_USER_KEY) || localStorage.getItem(LAST_USER_KEY) || '').trim().toLowerCase();
+    if (getUserProfile(rememberedUser)) {
+      activateUser(rememberedUser, false);
     } else {
       renderAuth();
     }
