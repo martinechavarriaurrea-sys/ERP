@@ -7,8 +7,6 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
   <style>
     :root {
       --bg:#0c0f13;
@@ -568,31 +566,15 @@
   (() => {
     'use strict';
 
-    // ══════════════════════════════════════════════════════════════
-    // CONFIGURACIÓN FIREBASE — para sincronizar entre dispositivos
-    // 1. Ve a https://console.firebase.google.com y crea un proyecto
-    // 2. Activa Firestore Database (modo producción o prueba)
-    // 3. En Reglas de Firestore usa:  allow read, write: if true;
-    // 4. En Config del proyecto → Tus apps → Web → copia los valores
-    // ══════════════════════════════════════════════════════════════
-    const FIREBASE_CONFIG = {
-      apiKey: "",
-      authDomain: "",
-      projectId: "",
-      storageBucket: "",
-      messagingSenderId: "",
-      appId: ""
-    };
+    // Repo de GitHub donde se guardan los datos (un JSON por usuario)
+    const GH_OWNER = 'martinechavarriaurrea-sys';
+    const GH_REPO  = 'ERP';
+    const GH_BRANCH = 'main';
+    const GH_TOKEN_LSKEY = 'erp_gh_token';
+    const _ghSha = {}; // caché de SHA por userId (necesario para updates en GitHub API)
+    let _ghSaveTimer = null;
 
-    let db = null;
-    try {
-      if (FIREBASE_CONFIG.projectId && typeof firebase !== 'undefined') {
-        if (!firebase.apps.length) firebase.initializeApp(FIREBASE_CONFIG);
-        db = firebase.firestore();
-      }
-    } catch (e) {
-      console.warn('[ERP] Firebase init failed:', e.message);
-    }
+    function ghToken() { return localStorage.getItem(GH_TOKEN_LSKEY) || ''; }
 
     const STORAGE_BASE_KEY = 'erp_martin_abril2026';
     const SESSION_USER_KEY = `${STORAGE_BASE_KEY}__session_user`;
@@ -1053,27 +1035,76 @@
       localStorage.setItem(activeStorageKey, JSON.stringify(state));
       localStorage.setItem(activeStorageKey + '__ts', now);
       lastSavedAt = now;
-      if (db && activeUserId) cloudSave(activeUserId, now);
+      if (ghToken() && activeUserId) {
+        clearTimeout(_ghSaveTimer);
+        _ghSaveTimer = setTimeout(() => ghSave(activeUserId, now), 4000);
+      }
     }
 
-    function cloudSave(userId, timestamp) {
-      if (!db || !userId) return;
-      db.collection('erp_state').doc(userId).set({
-        data: JSON.stringify(state),
-        saved_at: timestamp || new Date().toISOString()
-      }).catch((e) => console.warn('[ERP] Cloud save failed:', e.message));
+    function ghHeaders() {
+      return {
+        'Authorization': `Bearer ${ghToken()}`,
+        'Accept': 'application/vnd.github+json',
+        'Content-Type': 'application/json',
+        'X-GitHub-Api-Version': '2022-11-28'
+      };
     }
 
-    async function cloudSync(userId) {
-      if (!db || !userId || !activeStorageKey) return;
+    function ghPath(userId) {
+      return `https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/contents/data/${userId}.json`;
+    }
+
+    async function ghLoad(userId) {
+      if (!ghToken()) return null;
       try {
-        const doc = await db.collection('erp_state').doc(userId).get();
-        if (!doc.exists) {
-          const localTs = localStorage.getItem(activeStorageKey + '__ts');
-          if (localTs) cloudSave(userId, localTs);
+        const resp = await fetch(`${ghPath(userId)}?ref=${GH_BRANCH}`, { headers: ghHeaders() });
+        if (resp.status === 404) return null;
+        if (!resp.ok) throw new Error(`GitHub ${resp.status}`);
+        const file = await resp.json();
+        _ghSha[userId] = file.sha;
+        return JSON.parse(decodeURIComponent(escape(atob(file.content.replace(/\n/g, '')))));
+      } catch (e) {
+        console.warn('[ERP] ghLoad failed:', e.message);
+        return null;
+      }
+    }
+
+    async function ghSave(userId, timestamp) {
+      if (!ghToken() || !userId) return;
+      const payload = { data: JSON.stringify(state), saved_at: timestamp || new Date().toISOString() };
+      const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(payload))));
+      const body = {
+        message: `erp: sync ${userId}`,
+        content: encoded,
+        branch: GH_BRANCH
+      };
+      if (_ghSha[userId]) body.sha = _ghSha[userId];
+      try {
+        const resp = await fetch(ghPath(userId), { method: 'PUT', headers: ghHeaders(), body: JSON.stringify(body) });
+        if (resp.status === 409 || resp.status === 422) {
+          // SHA desactualizado — obtener el nuevo SHA y reintentar
+          delete _ghSha[userId];
+          const current = await ghLoad(userId);
+          if (current) await ghSave(userId, timestamp);
           return;
         }
-        const cloud = doc.data();
+        if (!resp.ok) throw new Error(`GitHub ${resp.status}`);
+        const result = await resp.json();
+        if (result.content?.sha) _ghSha[userId] = result.content.sha;
+      } catch (e) {
+        console.warn('[ERP] ghSave failed:', e.message);
+      }
+    }
+
+    async function ghSync(userId) {
+      if (!ghToken() || !userId || !activeStorageKey) return;
+      try {
+        const cloud = await ghLoad(userId);
+        if (!cloud) {
+          const localTs = localStorage.getItem(activeStorageKey + '__ts');
+          if (localTs) ghSave(userId, localTs);
+          return;
+        }
         let cloudState;
         try { cloudState = JSON.parse(cloud.data); } catch { return; }
         const localTs = localStorage.getItem(activeStorageKey + '__ts') || '';
@@ -1083,18 +1114,13 @@
           localStorage.setItem(activeStorageKey, JSON.stringify(state));
           localStorage.setItem(activeStorageKey + '__ts', cloudTs);
           lastSavedAt = cloudTs;
-          if (!setupHasContent()) {
-            renderSetup();
-          } else {
-            ensureMonthSnapshot();
-            renderShell();
-          }
-          showToast('Datos sincronizados ☁');
+          if (!setupHasContent()) { renderSetup(); } else { ensureMonthSnapshot(); renderShell(); }
+          showToast('Datos sincronizados desde GitHub');
         } else {
-          cloudSave(userId, localTs || new Date().toISOString());
+          ghSave(userId, localTs || new Date().toISOString());
         }
       } catch (e) {
-        console.warn('[ERP] Cloud sync failed:', e.message);
+        console.warn('[ERP] ghSync failed:', e.message);
       }
     }
 
@@ -1308,7 +1334,7 @@
         renderShell();
       }
       if (saldosApplied) showToast('Saldos aplicados: Lulo $440.000 y Bancolombia $798.000');
-      cloudSync(profile.id);
+      ghSync(profile.id);
       return true;
     }
 
@@ -2355,25 +2381,31 @@
         </section>
 
         <section class="panel" style="margin-top:12px">
-          <h3 class="section-title">Sincronización en la nube</h3>
-          ${db
-            ? `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <h3 class="section-title">Sincronización GitHub</h3>
+          ${ghToken()
+            ? `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
                 <span style="width:9px;height:9px;border-radius:50%;background:var(--grn);display:inline-block;box-shadow:0 0 8px var(--grn)"></span>
-                <span class="tiny" style="color:var(--grn)">Firebase conectado — los datos se sincronizan automáticamente</span>
+                <span class="tiny" style="color:var(--grn)">Token activo — datos guardados en GitHub automáticamente</span>
               </div>
-              <button class="btn blu" data-action="cloud-sync-now" type="button" style="margin-bottom:4px">Sincronizar ahora</button>`
-            : `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
-                <span style="width:9px;height:9px;border-radius:50%;background:var(--red);display:inline-block"></span>
-                <span class="tiny" style="color:var(--red)">Firebase no configurado — datos solo en este navegador</span>
-              </div>
-              <div class="tiny muted" style="line-height:1.6">
-                Para activar sync entre dispositivos:<br>
-                1. Ve a <b>console.firebase.google.com</b> y crea un proyecto<br>
-                2. Activa <b>Firestore Database</b> (modo producción)<br>
-                3. En Reglas de Firestore pon: <code>allow read, write: if true;</code><br>
-                4. En Config del proyecto → Tus apps → Web → copia los valores<br>
-                5. Pégalos en <b>FIREBASE_CONFIG</b> al inicio del script en index.html
+              <div style="display:flex;gap:8px;flex-wrap:wrap">
+                <button class="btn blu" data-action="gh-sync-now" type="button">Sincronizar ahora</button>
+                <button class="btn ghost" data-action="gh-remove-token" type="button">Quitar token</button>
               </div>`
+            : `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+                <span style="width:9px;height:9px;border-radius:50%;background:var(--amb);display:inline-block"></span>
+                <span class="tiny" style="color:var(--amb)">Sin token — datos solo en este navegador</span>
+              </div>
+              <div class="tiny muted" style="margin-bottom:10px;line-height:1.6">
+                Pega un <b>Personal Access Token</b> de GitHub con permiso <b>Contents: Read and write</b> sobre el repo ERP.<br>
+                Crea uno en: github.com → Settings → Developer settings → Fine-grained tokens
+              </div>
+              <form id="gh-token-form" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+                <div class="field" style="flex:1;min-width:220px;margin:0">
+                  <label>Token de GitHub</label>
+                  <input id="gh-token-input" type="password" placeholder="github_pat_..." autocomplete="off" />
+                </div>
+                <button class="btn grn" type="submit">Guardar token</button>
+              </form>`
           }
         </section>
 
@@ -3319,7 +3351,8 @@
         downloadText(`acumulado_${todayISO()}.csv`, csv, 'text/csv;charset=utf-8');
       }
 
-      if (action === 'cloud-sync-now' && activeUserId) { cloudSync(activeUserId); showToast('Sincronizando...'); }
+      if (action === 'gh-sync-now' && activeUserId) { ghSync(activeUserId); showToast('Sincronizando con GitHub...'); }
+      if (action === 'gh-remove-token') { localStorage.removeItem(GH_TOKEN_LSKEY); renderShell(); showToast('Token eliminado'); }
       if (action === 'export-json') exportStateJson();
       if (action === 'trigger-import') {
         const input = document.getElementById('import-json-input');
@@ -3460,6 +3493,15 @@
         if (form.id === 'projection-form') saveProjectionForm(form);
         if (form.id === 'acumulado-form') saveAcumuladoForm(form);
         if (form.id === 'config-form') saveConfigForm(form);
+        if (form.id === 'gh-token-form') {
+          const token = (document.getElementById('gh-token-input')?.value || '').trim();
+          if (token) {
+            localStorage.setItem(GH_TOKEN_LSKEY, token);
+            renderShell();
+            showToast('Token guardado — sincronizando...');
+            ghSync(activeUserId);
+          }
+        }
       } catch (err) {
         console.error(err);
         showToast('Error al guardar. Intenta de nuevo.', 'err');
