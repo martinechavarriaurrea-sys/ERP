@@ -3206,13 +3206,19 @@
       }
     }
 
+    function triggerFormSubmit(form) {
+      if (!(form instanceof HTMLFormElement)) return;
+      const evt = new Event('submit', { bubbles: true, cancelable: true });
+      form.dispatchEvent(evt);
+    }
+
     function onClick(event) {
       const submitControl = event.target.closest('button[type="submit"],input[type="submit"]');
       if (submitControl) {
         const form = submitControl.form || submitControl.closest('form');
-        if (form && typeof form.requestSubmit === 'function') {
+        if (form) {
           event.preventDefault();
-          form.requestSubmit(submitControl);
+          triggerFormSubmit(form);
           return;
         }
       }
@@ -3285,46 +3291,51 @@
       if (!(form instanceof HTMLFormElement)) return;
       event.preventDefault();
 
-      if (form.id === 'auth-form') {
-        const data = readForm(form);
-        const userId = inferUserByCode(data.codigo || '');
-        if (!userId) {
-          showToast('Código inválido.', 'err');
+      try {
+        if (form.id === 'auth-form') {
+          const data = readForm(form);
+          const userId = inferUserByCode(data.codigo || '');
+          if (!userId) {
+            showToast('Código inválido.', 'err');
+            return;
+          }
+          const ok = activateUser(userId, true);
+          if (ok) showToast(`Sesión iniciada: ${getUserProfile(userId)?.name || userId}`);
           return;
         }
-        const ok = activateUser(userId, true);
-        if (ok) showToast(`Sesión iniciada: ${getUserProfile(userId)?.name || userId}`);
-        return;
-      }
 
-      if (form.id === 'setup-form') {
-        if (!activeUserId || !activeStorageKey) {
-          showToast('Primero inicia sesión.', 'err');
-          renderAuth();
-          return;
+        if (form.id === 'setup-form') {
+          if (!activeUserId || !activeStorageKey) {
+            showToast('Primero inicia sesión.', 'err');
+            renderAuth();
+            return;
+          }
+          const data = readForm(form);
+          state.config.nombre = String(data.nombre || '');
+          state.config.deuda_inicial_total = toNumber(data.deuda_inicial_total);
+          state.config.ingreso_mensual = toNumber(data.ingreso_mensual);
+          state.config.moneda = state.config.moneda || 'COP';
+          persistState();
+          ensureMonthSnapshot();
+          renderShell();
+          setRoute('dashboard');
+          showToast('Configuración inicial guardada');
         }
-        const data = readForm(form);
-        state.config.nombre = String(data.nombre || '');
-        state.config.deuda_inicial_total = toNumber(data.deuda_inicial_total);
-        state.config.ingreso_mensual = toNumber(data.ingreso_mensual);
-        state.config.moneda = state.config.moneda || 'COP';
-        persistState();
-        ensureMonthSnapshot();
-        renderShell();
-        setRoute('dashboard');
-        showToast('Configuración inicial guardada');
-      }
 
-      if (form.id === 'register-form') saveRegisterForm(form);
-      if (form.id === 'movement-edit-form') saveMovementEdit(form);
-      if (form.id === 'cuenta-form') saveCuentaForm(form);
-      if (form.id === 'cobrar-form') saveCobrarForm(form);
-      if (form.id === 'cobrar-deposit-form') saveCobrarDepositForm(form);
-      if (form.id === 'deuda-form') saveDeudaForm(form);
-      if (form.id === 'abono-form') saveAbonoForm(form);
-      if (form.id === 'projection-form') saveProjectionForm(form);
-      if (form.id === 'acumulado-form') saveAcumuladoForm(form);
-      if (form.id === 'config-form') saveConfigForm(form);
+        if (form.id === 'register-form') saveRegisterForm(form);
+        if (form.id === 'movement-edit-form') saveMovementEdit(form);
+        if (form.id === 'cuenta-form') saveCuentaForm(form);
+        if (form.id === 'cobrar-form') saveCobrarForm(form);
+        if (form.id === 'cobrar-deposit-form') saveCobrarDepositForm(form);
+        if (form.id === 'deuda-form') saveDeudaForm(form);
+        if (form.id === 'abono-form') saveAbonoForm(form);
+        if (form.id === 'projection-form') saveProjectionForm(form);
+        if (form.id === 'acumulado-form') saveAcumuladoForm(form);
+        if (form.id === 'config-form') saveConfigForm(form);
+      } catch (err) {
+        console.error(err);
+        showToast('Error al guardar. Intenta de nuevo.', 'err');
+      }
     }
 
     function onKeyDown(event) {
@@ -3338,9 +3349,9 @@
         const tag = target.tagName.toLowerCase();
         if (tag === 'textarea') return;
         const form = target.closest('form');
-        if (form && typeof form.requestSubmit === 'function') {
+        if (form) {
           event.preventDefault();
-          form.requestSubmit();
+          triggerFormSubmit(form);
         }
       }
     }
