@@ -566,8 +566,27 @@
   (() => {
     'use strict';
 
-    const _ghSha = {}; // caché de SHA por userId (necesario para updates en GitHub API)
-    let _ghSaveTimer = null;
+    const _ghSha = {};
+    let _ghSaveInFlight = null;
+    let _ghQueuedSave = null;
+
+    function encodeStateForGH(payload) {
+      const json = JSON.stringify(payload);
+      const bytes = new TextEncoder().encode(json);
+      let bin = '';
+      const CHUNK = 0x8000;
+      for (let i = 0; i < bytes.length; i += CHUNK) {
+        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+      }
+      return btoa(bin);
+    }
+
+    function decodeStateFromGH(b64) {
+      const bin = atob(b64.replace(/\s/g, ''));
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return JSON.parse(new TextDecoder().decode(bytes));
+    }
 
     const STORAGE_BASE_KEY = 'erp_martin_abril2026';
     const SESSION_USER_KEY = `${STORAGE_BASE_KEY}__session_user`;
@@ -645,6 +664,12 @@
     let state = defaultState();
     let shellMounted = false;
     let lastSavedAt = null;
+    let syncStatus = {
+      tone: 'gray',
+      text: 'Esperando sincronización',
+      cloudAt: ''
+    };
+    let lastSyncDebug = null;
 
     const ui = {
       route: 'dashboard',
@@ -669,6 +694,25 @@
 
     function defaultState() {
       return cloneDefaultState();
+    }
+
+    function setSyncStatus(text, tone = 'gray', cloudAt = syncStatus.cloudAt || '') {
+      syncStatus = {
+        tone,
+        text: String(text || ''),
+        cloudAt: cloudAt || ''
+      };
+      if (shellMounted && ui.route === 'config') renderRoute('config');
+    }
+
+    function updateSyncDebug(patch) {
+      lastSyncDebug = {
+        ...(lastSyncDebug || {}),
+        ...(patch || {})
+      };
+      try {
+        window.__ERP_SYNC_DEBUG = lastSyncDebug;
+      } catch {}
     }
 
     function toNumber(value) {
@@ -839,6 +883,19 @@
       return a + b + c + d;
     }
 
+    function stateHasContent(snapshot = state) {
+      const candidate = snapshot && typeof snapshot === 'object' ? snapshot : defaultState();
+      const config = candidate.config && typeof candidate.config === 'object' ? candidate.config : {};
+      const hasConfig = !!String(config.nombre || '').trim()
+        || toNumber(config.deuda_inicial_total) > 0
+        || toNumber(config.ingreso_mensual) > 0;
+      const rowCount = (Array.isArray(candidate.movimientos) ? candidate.movimientos.length : 0)
+        + (Array.isArray(candidate.deudas) ? candidate.deudas.length : 0)
+        + (Array.isArray(candidate.cobrar) ? candidate.cobrar.length : 0)
+        + (Array.isArray(candidate.cuentas) ? candidate.cuentas.length : 0);
+      return hasConfig || rowCount > 0;
+    }
+
     function getUserProfile(userId) {
       return USER_PROFILES[userId] || null;
     }
@@ -984,6 +1041,10 @@
       const fixedMesInicio = {};
       Object.entries(out.mes_inicio || {}).forEach(([mk, snap]) => {
         if (!snap || typeof snap !== 'object') return;
+        if (!Object.keys(snap).length) {
+          fixedMesInicio[mk] = {};
+          return;
+        }
         const row = {};
         Object.entries(snap).forEach(([key, val]) => {
           const k = String(key);
@@ -1012,105 +1073,350 @@
     }
 
     function loadState() {
-      if (!activeStorageKey) return defaultState();
-      let S;
-      try {
-        S = JSON.parse(localStorage.getItem(activeStorageKey) || 'null') || defaultState();
-      } catch {
-        S = defaultState();
-      }
-      return normalizeState(S);
+      return readStoredState().state;
     }
 
-    function persistState() {
-      if (!activeStorageKey) return;
-      const now = new Date().toISOString();
-      localStorage.setItem(activeStorageKey, JSON.stringify(state));
-      localStorage.setItem(activeStorageKey + '__ts', now);
-      lastSavedAt = now;
-      if (activeUserId) {
-        clearTimeout(_ghSaveTimer);
-        _ghSaveTimer = setTimeout(() => ghSave(activeUserId, now), 4000);
+    function readStoredState(storageKey = activeStorageKey) {
+      if (!storageKey) {
+        return {
+          state: defaultState(),
+          raw: '',
+          ts: '',
+          hasContent: false
+        };
       }
+
+      const raw = localStorage.getItem(storageKey) || '';
+      const parsed = raw ? safeParseState(raw) : null;
+      const normalized = normalizeState(parsed || defaultState());
+
+      return {
+        state: normalized,
+        raw,
+        ts: String(localStorage.getItem(storageKey + '__ts') || ''),
+        hasContent: stateHasContent(normalized)
+      };
+    }
+
+    function writeStoredState(snapshot, timestamp, storageKey = activeStorageKey) {
+      if (!storageKey) return { state: normalizeState(snapshot), ts: '' };
+      const normalized = normalizeState(snapshot);
+      const ts = String(timestamp || new Date().toISOString());
+      localStorage.setItem(storageKey, JSON.stringify(normalized));
+      localStorage.setItem(storageKey + '__ts', ts);
+      lastSavedAt = ts;
+      return { state: normalized, ts };
+    }
+
+    function queueGhSave(userId, timestamp, snapshot, options = {}) {
+      if (!userId) return null;
+      _ghQueuedSave = {
+        userId,
+        timestamp,
+        snapshot: normalizeState(snapshot),
+        keepalive: !!options.keepalive
+      };
+      setSyncStatus('Cambios pendientes por subir a GitHub', 'amb', syncStatus.cloudAt);
+      if (_ghSaveInFlight) return _ghSaveInFlight;
+
+      _ghSaveInFlight = (async () => {
+        while (_ghQueuedSave) {
+          const job = _ghQueuedSave;
+          _ghQueuedSave = null;
+          await ghSave(job.userId, job.timestamp, {
+            snapshot: job.snapshot,
+            keepalive: job.keepalive
+          });
+        }
+      })().finally(() => {
+        _ghSaveInFlight = null;
+      });
+
+      return _ghSaveInFlight;
+    }
+
+    function persistState(options = {}) {
+      if (!activeStorageKey) return '';
+      const {
+        timestamp = new Date().toISOString(),
+        scheduleRemote = true,
+        snapshot = state
+      } = options;
+      const stored = writeStoredState(snapshot, timestamp);
+      state = stored.state;
+      if (scheduleRemote && activeUserId) {
+        queueGhSave(activeUserId, stored.ts, stored.state);
+      }
+      return stored.ts;
     }
 
     async function ghLoad(userId) {
       try {
-        const resp = await fetch(`/api/sync?userId=${userId}`);
-        if (resp.status === 404) return null;
+        const resp = await fetch(`/api/sync?userId=${userId}`, {
+          cache: 'no-store',
+          headers: { 'Cache-Control': 'no-store' }
+        });
+        if (resp.status === 404) return { missing: true, payload: null };
         if (!resp.ok) throw new Error(`sync ${resp.status}`);
         const file = await resp.json();
         _ghSha[userId] = file.sha;
-        return JSON.parse(decodeURIComponent(escape(atob(file.content.replace(/\n/g, '')))));
+        return {
+          missing: false,
+          payload: decodeStateFromGH(file.content)
+        };
       } catch (e) {
         console.warn('[ERP] ghLoad failed:', e.message);
-        return null;
+        return { missing: false, error: e, payload: null };
       }
     }
 
-    async function ghSave(userId, timestamp) {
-      if (!userId) return;
-      const payload = { data: JSON.stringify(state), saved_at: timestamp || new Date().toISOString() };
-      const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(payload))));
+    async function ghSave(userId, timestamp, options = {}) {
+      if (!userId) return false;
+      const snapshot = normalizeState(options.snapshot || state);
+      const payloadTs = String(timestamp || new Date().toISOString());
+      const payload = { data: JSON.stringify(snapshot), saved_at: payloadTs };
+      const encoded = encodeStateForGH(payload);
       const body = { message: `erp: sync ${userId}`, content: encoded };
       if (_ghSha[userId]) body.sha = _ghSha[userId];
       try {
+        setSyncStatus('Subiendo cambios a GitHub...', 'blu', syncStatus.cloudAt);
         const resp = await fetch(`/api/sync?userId=${userId}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
+          cache: 'no-store',
+          keepalive: !!options.keepalive,
           body: JSON.stringify(body)
         });
         if (resp.status === 409 || resp.status === 422) {
           delete _ghSha[userId];
           const current = await ghLoad(userId);
-          if (current) await ghSave(userId, timestamp);
-          return;
+          if (!current?.error) return ghSave(userId, payloadTs, options);
+          return false;
         }
         if (!resp.ok) throw new Error(`sync ${resp.status}`);
         const result = await resp.json();
         if (result.content?.sha) _ghSha[userId] = result.content.sha;
+        setSyncStatus('Sincronizado con GitHub', 'grn', payloadTs);
+        return true;
       } catch (e) {
         console.warn('[ERP] ghSave failed:', e.message);
+        setSyncStatus('Error al guardar en GitHub', 'red', syncStatus.cloudAt);
+        return false;
       }
     }
 
-    async function ghSync(userId) {
-      if (!userId || !activeStorageKey) return;
+    function ghSaveSync(userId, timestamp, snapshot) {
+      if (!userId) return false;
+      const cleanSnapshot = normalizeState(snapshot || state);
+      const payloadTs = String(timestamp || new Date().toISOString());
+      const payload = {
+        data: JSON.stringify(cleanSnapshot),
+        saved_at: payloadTs
+      };
+      const encoded = encodeStateForGH(payload);
+      const body = {
+        message: `erp: sync ${userId}`,
+        content: encoded
+      };
+      if (_ghSha[userId]) body.sha = _ghSha[userId];
+
+      const send = () => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('PUT', `/api/sync?userId=${encodeURIComponent(userId)}`, false);
+        xhr.setRequestHeader('Content-Type', 'application/json');
+        xhr.send(JSON.stringify(body));
+        return xhr;
+      };
+
       try {
+        setSyncStatus('Guardando en GitHub...', 'blu', syncStatus.cloudAt);
+        let xhr = send();
+        if (xhr.status === 409 || xhr.status === 422) {
+          delete _ghSha[userId];
+          delete body.sha;
+          xhr = send();
+        }
+        if (xhr.status < 200 || xhr.status >= 300) {
+          setSyncStatus('Error al guardar en GitHub', 'red', syncStatus.cloudAt);
+          return false;
+        }
+        const result = safeParseState(xhr.responseText);
+        if (result?.content?.sha) _ghSha[userId] = result.content.sha;
+        setSyncStatus('Sincronizado con GitHub', 'grn', payloadTs);
+        return true;
+      } catch (e) {
+        console.warn('[ERP] ghSaveSync failed:', e.message);
+        setSyncStatus('Error al guardar en GitHub', 'red', syncStatus.cloudAt);
+        return false;
+      }
+    }
+
+    function ghBeaconSave(userId, timestamp, snapshot) {
+      if (!userId || !navigator.sendBeacon) return false;
+      const cleanSnapshot = normalizeState(snapshot || state);
+      const payloadTs = String(timestamp || new Date().toISOString());
+      const payload = {
+        data: JSON.stringify(cleanSnapshot),
+        saved_at: payloadTs
+      };
+      const encoded = encodeStateForGH(payload);
+      const body = {
+        message: `erp: sync ${userId}`,
+        content: encoded
+      };
+      const blob = new Blob([JSON.stringify(body)], { type: 'application/json' });
+      return navigator.sendBeacon(`/api/sync?userId=${encodeURIComponent(userId)}`, blob);
+    }
+
+    async function flushGhSave(options = {}) {
+      if (!activeUserId || !activeStorageKey) return false;
+      const local = readStoredState();
+      if (!local.ts) return false;
+      ghBeaconSave(activeUserId, local.ts, local.state);
+      return ghSave(activeUserId, local.ts, {
+        snapshot: local.state,
+        keepalive: !!options.keepalive
+      });
+    }
+
+    async function ghSync(userId, options = {}) {
+      if (!userId || !activeStorageKey) return false;
+      try {
+        const local = readStoredState();
+        updateSyncDebug({
+          phase: 'start',
+          userId,
+          localTs: local.ts,
+          localHasContent: local.hasContent,
+          localMovimientos: Array.isArray(local.state?.movimientos) ? local.state.movimientos.length : -1,
+          localCuentas: Array.isArray(local.state?.cuentas) ? local.state.cuentas.length : -1
+        });
+        setSyncStatus(options.initial ? 'Abriendo cuenta y consultando GitHub...' : 'Sincronizando con GitHub...', 'blu', syncStatus.cloudAt);
+
         const cloud = await ghLoad(userId);
-        if (!cloud) {
-          const localTs = localStorage.getItem(activeStorageKey + '__ts');
-          if (localTs) ghSave(userId, localTs);
-          return;
+        let cloudState = null;
+        let cloudTs = '';
+        let useCloud = false;
+        let shouldPushLocal = false;
+
+        if (cloud?.error) {
+          updateSyncDebug({
+            phase: 'cloud-error',
+            cloudError: String(cloud.error?.message || cloud.error)
+          });
+          state = normalizeState(local.state);
+          ensureStateCollections();
+          const saldosApplied = applyMartinRequestedBalances();
+          const snapshotAdjusted = ensureMonthSnapshot({ persist: false });
+          const fallbackTs = saldosApplied || snapshotAdjusted
+            ? new Date().toISOString()
+            : (local.ts || new Date().toISOString());
+          writeStoredState(state, fallbackTs);
+          if (!setupHasContent()) renderSetup();
+          else renderShell();
+          setSyncStatus('GitHub no respondió; usando datos locales', local.hasContent ? 'amb' : 'red', syncStatus.cloudAt);
+          showToast(local.hasContent ? 'Sin conexión con GitHub — datos locales cargados' : 'Sin conexión con GitHub — sin datos', 'err');
+          return false;
         }
-        let cloudState;
-        try { cloudState = JSON.parse(cloud.data); } catch { return; }
-        const localTs = localStorage.getItem(activeStorageKey + '__ts') || '';
-        const cloudTs = cloud.saved_at || '';
-        if (cloudTs > localTs) {
-          state = normalizeState(cloudState);
-          localStorage.setItem(activeStorageKey, JSON.stringify(state));
-          localStorage.setItem(activeStorageKey + '__ts', cloudTs);
-          lastSavedAt = cloudTs;
-          if (!setupHasContent()) { renderSetup(); } else { ensureMonthSnapshot(); renderShell(); }
-          showToast('Datos sincronizados desde GitHub');
+
+        if (!cloud?.missing) {
+          try {
+            cloudState = normalizeState(JSON.parse(cloud.payload.data));
+            cloudTs = String(cloud.payload.saved_at || '');
+            updateSyncDebug({
+              phase: 'cloud-parsed',
+              cloudMissing: false,
+              cloudTs,
+              cloudPayloadType: typeof cloud.payload?.data,
+              cloudMovimientos: Array.isArray(cloudState?.movimientos) ? cloudState.movimientos.length : -1,
+              cloudCuentas: Array.isArray(cloudState?.cuentas) ? cloudState.cuentas.length : -1
+            });
+          } catch {
+            cloudState = null;
+            updateSyncDebug({
+              phase: 'cloud-parse-failed',
+              cloudMissing: false,
+              cloudPayloadType: typeof cloud?.payload?.data,
+              cloudPayloadPreview: String(cloud?.payload?.data || '').slice(0, 160)
+            });
+          }
         } else {
-          ghSave(userId, localTs || new Date().toISOString());
+          updateSyncDebug({
+            phase: 'cloud-missing',
+            cloudMissing: true
+          });
         }
+
+        if (cloudState && stateHasContent(cloudState) && !local.hasContent) {
+          useCloud = true;
+        } else if (cloudState && !stateHasContent(cloudState) && local.hasContent) {
+          shouldPushLocal = true;
+        } else if (cloudState && cloudTs > local.ts) {
+          useCloud = true;
+        } else if (cloudState && local.ts > cloudTs) {
+          shouldPushLocal = local.hasContent;
+        } else if (!cloudState && cloud?.missing) {
+          shouldPushLocal = local.hasContent;
+        }
+
+        state = normalizeState(useCloud ? cloudState : local.state);
+        ensureStateCollections();
+
+        const saldosApplied = applyMartinRequestedBalances();
+        const snapshotAdjusted = ensureMonthSnapshot({ persist: false });
+        const needsRemoteSave = shouldPushLocal || saldosApplied || snapshotAdjusted;
+        const resolvedTs = needsRemoteSave
+          ? new Date().toISOString()
+          : (useCloud ? (cloudTs || local.ts || new Date().toISOString()) : (local.ts || cloudTs || new Date().toISOString()));
+
+        updateSyncDebug({
+          phase: 'decision',
+          cloudTs,
+          useCloud,
+          shouldPushLocal,
+          saldosApplied,
+          snapshotAdjusted,
+          needsRemoteSave,
+          resolvedTs,
+          finalMovimientos: Array.isArray(state?.movimientos) ? state.movimientos.length : -1,
+          finalCuentas: Array.isArray(state?.cuentas) ? state.cuentas.length : -1
+        });
+
+        writeStoredState(state, resolvedTs);
+
+        if (!setupHasContent()) renderSetup();
+        else renderShell();
+
+        if (useCloud) {
+          setSyncStatus('Datos cargados desde GitHub', 'grn', cloudTs || syncStatus.cloudAt);
+          if (!options.silentToast) showToast('Datos sincronizados desde GitHub');
+        }
+
+        if (needsRemoteSave) {
+          await ghSave(userId, resolvedTs, { snapshot: state });
+        } else if (!useCloud) {
+          setSyncStatus('Sincronizado con GitHub', 'grn', cloudTs || syncStatus.cloudAt);
+        }
+        return true;
       } catch (e) {
         console.warn('[ERP] ghSync failed:', e.message);
+        setSyncStatus('Error durante la sincronización', 'red', syncStatus.cloudAt);
+        return false;
       }
     }
 
-    function ensureMonthSnapshot() {
+    function ensureMonthSnapshot(options = {}) {
+      const { persist = true } = options;
       const mk = todayISO().slice(0, 7);
       if (!state.mes_inicio[mk]) {
         state.mes_inicio[mk] = {};
         state.deudas.forEach((d) => {
           state.mes_inicio[mk][String(d.id)] = toNumber(d.saldo);
         });
-        persistState();
+        if (persist) persistState();
+        return true;
       }
+      return false;
     }
 
     function getDebtById(id) {
@@ -1268,10 +1574,22 @@
     }
 
     function commitState(message = '') {
+      ensureMonthSnapshot({ persist: false });
       persistState();
-      ensureMonthSnapshot();
       renderRoute(ui.route);
       if (message) showToast(message, 'ok');
+    }
+
+    function renderSyncScreen(message = 'Consultando tus datos guardados...') {
+      app.innerHTML = `
+        <div class="setup-wrap">
+          <div class="setup-card">
+            <h2 style="margin:0">Abriendo cuenta</h2>
+            <div class="muted">${escapeHtml(message)}</div>
+          </div>
+        </div>
+      `;
+      shellMounted = false;
     }
 
     function renderAuth() {
@@ -1292,7 +1610,7 @@
       shellMounted = false;
     }
 
-    function activateUser(userId, persistSession = true) {
+    async function activateUser(userId, persistSession = true) {
       const profile = getUserProfile(userId);
       if (!profile) return false;
       if (persistSession) sessionStorage.setItem(SESSION_USER_KEY, profile.id);
@@ -1300,19 +1618,10 @@
       activeUserId = profile.id;
       activeStorageKey = profile.key;
       migrateLegacyStorageForUser(profile.id);
-      state = loadState();
-      ensureStateCollections();
-      const saldosApplied = applyMartinRequestedBalances();
       ui.route = 'dashboard';
       ui.acResult = null;
-      if (!setupHasContent()) {
-        renderSetup();
-      } else {
-        ensureMonthSnapshot();
-        renderShell();
-      }
-      if (saldosApplied) showToast('Saldos aplicados: Lulo $440.000 y Bancolombia $798.000');
-      ghSync(profile.id);
+      renderSyncScreen();
+      await ghSync(profile.id, { initial: true, silentToast: true });
       return true;
     }
 
@@ -1382,7 +1691,6 @@
       }
 
       state.config.__saldos_fix_20260416 = true;
-      persistState();
       return changed;
     }
 
@@ -1848,7 +2156,7 @@
     }
 
     function renderPagar() {
-      ensureMonthSnapshot();
+      ensureMonthSnapshot({ persist: false });
       const monthKey = todayISO().slice(0, 7);
       const sorted = [...state.deudas].sort((a, b) => toNumber(b.tasa_ea) - toNumber(a.tasa_ea));
       const totalDebt = sorted.reduce((s, d) => s + toNumber(d.saldo), 0);
@@ -2345,6 +2653,7 @@
 
     function renderConfig() {
       const saveText = lastSavedAt ? new Date(lastSavedAt).toLocaleString('es-CO') : 'Sin guardados recientes';
+      const cloudText = syncStatus.cloudAt ? new Date(syncStatus.cloudAt).toLocaleString('es-CO') : 'Sin respaldo remoto confirmado';
       return `
         <section class="panel">
           <h3 class="section-title">Configuración</h3>
@@ -2361,8 +2670,8 @@
         <section class="panel" style="margin-top:12px">
           <h3 class="section-title">Sincronización GitHub</h3>
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
-            <span style="width:9px;height:9px;border-radius:50%;background:var(--grn);display:inline-block;box-shadow:0 0 8px var(--grn)"></span>
-            <span class="tiny" style="color:var(--grn)">Activo — datos guardados en GitHub automáticamente</span>
+            <span class="badge ${escapeHtml(syncStatus.tone)}">${escapeHtml(syncStatus.text)}</span>
+            <span class="tiny muted">Último respaldo remoto: ${escapeHtml(cloudText)}</span>
           </div>
           <button class="btn blu" data-action="gh-sync-now" type="button">Sincronizar ahora</button>
         </section>
@@ -3097,8 +3406,6 @@
       } else {
         state.deudas.push(payload);
       }
-
-      ensureMonthSnapshot();
       const msg = editId ? `Deuda actualizada: ${payload.acreedor} ${money(payload.saldo)}` : 'Deuda creada';
       commitState(msg);
       closeModal();
@@ -3189,11 +3496,7 @@
     }
 
     function setupHasContent() {
-      const hasConfig = !!String(state.config.nombre || '').trim()
-        || toNumber(state.config.deuda_inicial_total) > 0
-        || toNumber(state.config.ingreso_mensual) > 0;
-      const hasRows = state.movimientos.length + state.deudas.length + state.cobrar.length + state.cuentas.length > 0;
-      return hasConfig || hasRows;
+      return stateHasContent(state);
     }
 
     function exportStateJson() {
@@ -3318,7 +3621,10 @@
       if (action === 'reset-app') {
         if (!confirm(CONFIRM_MSG)) return;
         if (!confirm(CONFIRM_MSG)) return;
-        if (activeStorageKey) localStorage.removeItem(activeStorageKey);
+        if (activeStorageKey) {
+          localStorage.removeItem(activeStorageKey);
+          localStorage.removeItem(activeStorageKey + '__ts');
+        }
         sessionStorage.removeItem(SESSION_USER_KEY);
         location.reload();
       }
@@ -3380,11 +3686,11 @@
           }
           state = normalizeState(parsed);
           ensureStateCollections();
+          ensureMonthSnapshot({ persist: false });
           persistState();
           if (!setupHasContent()) {
             renderSetup();
           } else {
-            ensureMonthSnapshot();
             if (!shellMounted) renderShell();
             else renderRoute(ui.route);
           }
@@ -3404,7 +3710,7 @@
       }
     }
 
-    function onSubmit(event) {
+    async function onSubmit(event) {
       const form = event.target;
       if (!(form instanceof HTMLFormElement)) return;
       event.preventDefault();
@@ -3417,7 +3723,7 @@
             showToast('Código inválido.', 'err');
             return;
           }
-          const ok = activateUser(userId, true);
+          const ok = await activateUser(userId, true);
           if (ok) showToast(`Sesión iniciada: ${getUserProfile(userId)?.name || userId}`);
           return;
         }
@@ -3433,8 +3739,8 @@
           state.config.deuda_inicial_total = toNumber(data.deuda_inicial_total);
           state.config.ingreso_mensual = toNumber(data.ingreso_mensual);
           state.config.moneda = state.config.moneda || 'COP';
+          ensureMonthSnapshot({ persist: false });
           persistState();
-          ensureMonthSnapshot();
           renderShell();
           setRoute('dashboard');
           showToast('Configuración inicial guardada');
@@ -3486,21 +3792,32 @@
 
     window.addEventListener('beforeunload', () => {
       try {
-        persistState();
+        persistState({ scheduleRemote: false });
+        flushGhSave({ keepalive: true });
+      } catch {}
+    });
+
+    window.addEventListener('pagehide', () => {
+      try {
+        persistState({ scheduleRemote: false });
+        flushGhSave({ keepalive: true });
       } catch {}
     });
 
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'hidden') {
         try {
-          persistState();
+          persistState({ scheduleRemote: false });
+          flushGhSave({ keepalive: true });
         } catch {}
       }
     });
 
     const rememberedUser = String(sessionStorage.getItem(SESSION_USER_KEY) || localStorage.getItem(LAST_USER_KEY) || '').trim().toLowerCase();
     if (getUserProfile(rememberedUser)) {
-      activateUser(rememberedUser, false);
+      activateUser(rememberedUser, false).catch(() => {
+        renderAuth();
+      });
     } else {
       renderAuth();
     }
