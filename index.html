@@ -7,6 +7,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
   <style>
     :root {
       --bg:#0c0f13;
@@ -566,6 +568,32 @@
   (() => {
     'use strict';
 
+    // ══════════════════════════════════════════════════════════════
+    // CONFIGURACIÓN FIREBASE — para sincronizar entre dispositivos
+    // 1. Ve a https://console.firebase.google.com y crea un proyecto
+    // 2. Activa Firestore Database (modo producción o prueba)
+    // 3. En Reglas de Firestore usa:  allow read, write: if true;
+    // 4. En Config del proyecto → Tus apps → Web → copia los valores
+    // ══════════════════════════════════════════════════════════════
+    const FIREBASE_CONFIG = {
+      apiKey: "",
+      authDomain: "",
+      projectId: "",
+      storageBucket: "",
+      messagingSenderId: "",
+      appId: ""
+    };
+
+    let db = null;
+    try {
+      if (FIREBASE_CONFIG.projectId && typeof firebase !== 'undefined') {
+        if (!firebase.apps.length) firebase.initializeApp(FIREBASE_CONFIG);
+        db = firebase.firestore();
+      }
+    } catch (e) {
+      console.warn('[ERP] Firebase init failed:', e.message);
+    }
+
     const STORAGE_BASE_KEY = 'erp_martin_abril2026';
     const SESSION_USER_KEY = `${STORAGE_BASE_KEY}__session_user`;
     const LAST_USER_KEY = `${STORAGE_BASE_KEY}__last_user`;
@@ -608,6 +636,7 @@
       deudas: [],
       cobrar: [],
       cuentas: [],
+      historial: [],
       proyeccion: {
         ingreso_mensual: 0,
         disponible_deuda: 0,
@@ -618,7 +647,8 @@
       config: {
         nombre: '',
         deuda_inicial_total: 0,
-        ingreso_mensual: 0
+        ingreso_mensual: 0,
+        ultimo_cambio_at: ''
       },
       mes_inicio: {}
     };
@@ -1019,8 +1049,53 @@
 
     function persistState() {
       if (!activeStorageKey) return;
+      const now = new Date().toISOString();
       localStorage.setItem(activeStorageKey, JSON.stringify(state));
-      lastSavedAt = new Date().toISOString();
+      localStorage.setItem(activeStorageKey + '__ts', now);
+      lastSavedAt = now;
+      if (db && activeUserId) cloudSave(activeUserId, now);
+    }
+
+    function cloudSave(userId, timestamp) {
+      if (!db || !userId) return;
+      db.collection('erp_state').doc(userId).set({
+        data: JSON.stringify(state),
+        saved_at: timestamp || new Date().toISOString()
+      }).catch((e) => console.warn('[ERP] Cloud save failed:', e.message));
+    }
+
+    async function cloudSync(userId) {
+      if (!db || !userId || !activeStorageKey) return;
+      try {
+        const doc = await db.collection('erp_state').doc(userId).get();
+        if (!doc.exists) {
+          const localTs = localStorage.getItem(activeStorageKey + '__ts');
+          if (localTs) cloudSave(userId, localTs);
+          return;
+        }
+        const cloud = doc.data();
+        let cloudState;
+        try { cloudState = JSON.parse(cloud.data); } catch { return; }
+        const localTs = localStorage.getItem(activeStorageKey + '__ts') || '';
+        const cloudTs = cloud.saved_at || '';
+        if (cloudTs > localTs) {
+          state = normalizeState(cloudState);
+          localStorage.setItem(activeStorageKey, JSON.stringify(state));
+          localStorage.setItem(activeStorageKey + '__ts', cloudTs);
+          lastSavedAt = cloudTs;
+          if (!setupHasContent()) {
+            renderSetup();
+          } else {
+            ensureMonthSnapshot();
+            renderShell();
+          }
+          showToast('Datos sincronizados ☁');
+        } else {
+          cloudSave(userId, localTs || new Date().toISOString());
+        }
+      } catch (e) {
+        console.warn('[ERP] Cloud sync failed:', e.message);
+      }
     }
 
     function ensureMonthSnapshot() {
@@ -1233,6 +1308,7 @@
         renderShell();
       }
       if (saldosApplied) showToast('Saldos aplicados: Lulo $440.000 y Bancolombia $798.000');
+      cloudSync(profile.id);
       return true;
     }
 
@@ -2279,6 +2355,29 @@
         </section>
 
         <section class="panel" style="margin-top:12px">
+          <h3 class="section-title">Sincronización en la nube</h3>
+          ${db
+            ? `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                <span style="width:9px;height:9px;border-radius:50%;background:var(--grn);display:inline-block;box-shadow:0 0 8px var(--grn)"></span>
+                <span class="tiny" style="color:var(--grn)">Firebase conectado — los datos se sincronizan automáticamente</span>
+              </div>
+              <button class="btn blu" data-action="cloud-sync-now" type="button" style="margin-bottom:4px">Sincronizar ahora</button>`
+            : `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+                <span style="width:9px;height:9px;border-radius:50%;background:var(--red);display:inline-block"></span>
+                <span class="tiny" style="color:var(--red)">Firebase no configurado — datos solo en este navegador</span>
+              </div>
+              <div class="tiny muted" style="line-height:1.6">
+                Para activar sync entre dispositivos:<br>
+                1. Ve a <b>console.firebase.google.com</b> y crea un proyecto<br>
+                2. Activa <b>Firestore Database</b> (modo producción)<br>
+                3. En Reglas de Firestore pon: <code>allow read, write: if true;</code><br>
+                4. En Config del proyecto → Tus apps → Web → copia los valores<br>
+                5. Pégalos en <b>FIREBASE_CONFIG</b> al inicio del script en index.html
+              </div>`
+          }
+        </section>
+
+        <section class="panel" style="margin-top:12px">
           <h3 class="section-title">Datos</h3>
           <div class="actions">
             <button class="btn blu" data-action="export-json" type="button">Export JSON</button>
@@ -3220,6 +3319,7 @@
         downloadText(`acumulado_${todayISO()}.csv`, csv, 'text/csv;charset=utf-8');
       }
 
+      if (action === 'cloud-sync-now' && activeUserId) { cloudSync(activeUserId); showToast('Sincronizando...'); }
       if (action === 'export-json') exportStateJson();
       if (action === 'trigger-import') {
         const input = document.getElementById('import-json-input');
