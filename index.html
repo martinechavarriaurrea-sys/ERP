@@ -846,11 +846,13 @@
     function migrateLegacyStorageForUser(userId) {
       const profile = getUserProfile(userId);
       if (!profile) return;
-      if (localStorage.getItem(profile.key)) return;
       if (profile.id !== 'martin') return;
-      let bestRaw = null;
-      let bestScore = -1;
+      const currentRaw = localStorage.getItem(profile.key);
+      const currentScore = currentRaw ? stateScore(currentRaw) : 0;
+      let bestRaw = currentRaw;
+      let bestScore = currentScore;
       LEGACY_STORAGE_KEYS.forEach((key) => {
+        if (key === profile.key) return;
         const raw = localStorage.getItem(key);
         if (!raw) return;
         const score = stateScore(raw);
@@ -859,7 +861,7 @@
           bestRaw = raw;
         }
       });
-      if (bestRaw) {
+      if (bestRaw && bestScore > currentScore) {
         localStorage.setItem(profile.key, bestRaw);
       }
     }
@@ -1232,22 +1234,23 @@
       if (activeUserId !== 'martin') return false;
       state.config = state.config || {};
       if (state.config.__saldos_fix_20260416) return false;
-      if (!Array.isArray(state.cuentas) || !state.cuentas.length) return false;
+      if (!Array.isArray(state.cuentas)) state.cuentas = [];
 
       let changed = false;
-      let foundAny = false;
+      let foundLulo = false;
+      let foundBancolombia = false;
 
       state.cuentas.forEach((cuenta) => {
         const nombre = String(cuenta?.nombre || '').toLowerCase();
         if (nombre.includes('lulo')) {
-          foundAny = true;
+          foundLulo = true;
           if (toNumber(cuenta.saldo) !== 440000) {
             cuenta.saldo = 440000;
             changed = true;
           }
         }
         if (nombre.includes('bancolombia')) {
-          foundAny = true;
+          foundBancolombia = true;
           if (toNumber(cuenta.saldo) !== 798000) {
             cuenta.saldo = 798000;
             changed = true;
@@ -1255,10 +1258,32 @@
         }
       });
 
-      if (foundAny) {
-        state.config.__saldos_fix_20260416 = true;
-        persistState();
+      if (!foundLulo) {
+        state.cuentas.push({
+          id: nextEntityId(state.cuentas),
+          nombre: 'Lulo Bank',
+          tipo: 'Digital',
+          saldo: 440000,
+          color: 'verde',
+          notas: 'Saldo inicial solicitado'
+        });
+        changed = true;
       }
+
+      if (!foundBancolombia) {
+        state.cuentas.push({
+          id: nextEntityId(state.cuentas),
+          nombre: 'Bancolombia',
+          tipo: 'Corriente',
+          saldo: 798000,
+          color: 'azul',
+          notas: 'Saldo inicial solicitado'
+        });
+        changed = true;
+      }
+
+      state.config.__saldos_fix_20260416 = true;
+      persistState();
       return changed;
     }
 
