@@ -588,13 +588,13 @@
       return JSON.parse(new TextDecoder().decode(bytes));
     }
 
-    const STORAGE_BASE_KEY = 'erp_martin_abril2026';
+    const STORAGE_BASE_KEY = 'erp_app_v1';
     const SESSION_USER_KEY = `${STORAGE_BASE_KEY}__session_user`;
     const LAST_USER_KEY = `${STORAGE_BASE_KEY}__last_user`;
-    const LEGACY_STORAGE_KEYS = ['erp_martin_abril2026', 'erp_v1', 'erp_v1_u1', 'erp_v1_u2', 'erp_personal_v1'];
+    const LEGACY_STORAGE_KEYS = ['erp_app_v1'];
     const USER_PROFILES = {
-      martin: { id: 'martin', name: 'MARTIN', code: '1017924435', key: `${STORAGE_BASE_KEY}__martin` },
-      david: { id: 'david', name: 'David', code: '1234', key: `${STORAGE_BASE_KEY}__david` }
+      usuario1: { id: 'usuario1', name: 'Usuario 1', code: '1111', key: `${STORAGE_BASE_KEY}__usuario1` },
+      usuario2: { id: 'usuario2', name: 'Usuario 2', code: '2222', key: `${STORAGE_BASE_KEY}__usuario2` }
     };
     const CONFIRM_MSG = '¿Estás seguro? Esta acción no se puede deshacer.';
 
@@ -1603,7 +1603,7 @@
               <label>Código de acceso</label>
               <input name="codigo" type="password" inputmode="numeric" autocomplete="off" />
             </div>
-            <div class="tiny muted">MARTIN: 1017924435 · David: 1234</div>
+            <div class="tiny muted">Usuario 1: 1111 · Usuario 2: 2222</div>
             <button class="btn grn" type="submit">Entrar</button>
           </form>
         </div>

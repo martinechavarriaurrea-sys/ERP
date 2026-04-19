@@ -34,7 +34,7 @@ module.exports = async function handler(req, res) {
   const userId = String(req.query.userId || '').replace(/[^a-z0-9_-]/g, '');
   if (!userId) return sendJson(res, 400, { error: 'userId required' });
 
-  const url = `https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/contents/data/${userId}.json`;
+  const url = `https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/contents/data/shared/${userId}.json`;
   const headers = {
     Authorization: `Bearer ${token}`,
     Accept: 'application/vnd.github+json',
