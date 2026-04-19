@@ -593,8 +593,7 @@
     const LAST_USER_KEY = `${STORAGE_BASE_KEY}__last_user`;
     const LEGACY_STORAGE_KEYS = ['erp_app_v1'];
     const USER_PROFILES = {
-      usuario1: { id: 'usuario1', name: 'Usuario 1', code: '1111', key: `${STORAGE_BASE_KEY}__usuario1` },
-      usuario2: { id: 'usuario2', name: 'Usuario 2', code: '2222', key: `${STORAGE_BASE_KEY}__usuario2` }
+      usuario: { id: 'usuario', name: 'Usuario', code: '', key: `${STORAGE_BASE_KEY}__usuario` }
     };
     const CONFIRM_MSG = '¿Estás seguro? Esta acción no se puede deshacer.';
 
@@ -1594,21 +1593,10 @@
     }
 
     function renderAuth() {
-      app.innerHTML = `
-        <div class="setup-wrap">
-          <form id="auth-form" class="setup-card">
-            <h2 style="margin:0">Acceso</h2>
-            <div class="muted">Ingresa tu código para abrir tu cuenta.</div>
-            <div class="field">
-              <label>Código de acceso</label>
-              <input name="codigo" type="password" inputmode="numeric" autocomplete="off" />
-            </div>
-            <div class="tiny muted">Usuario 1: 1111 · Usuario 2: 2222</div>
-            <button class="btn grn" type="submit">Entrar</button>
-          </form>
-        </div>
-      `;
-      shellMounted = false;
+      renderSyncScreen('Abriendo tu cuenta...');
+      activateUser('usuario', true).catch(() => {
+        renderSyncScreen('Error al cargar. Recarga la página.');
+      });
     }
 
     async function activateUser(userId, persistSession = true) {
@@ -1767,7 +1755,6 @@
         <div class="txt" style="margin-top:6px">${escapeHtml(profile?.name || 'Sin usuario')}</div>
         <div class="txt" style="margin-top:6px">${escapeHtml(state.config.nombre || 'Sin nombre')}</div>
         <div class="txt" style="margin-top:6px">${escapeHtml(activeStorageKey)}</div>
-        <div style="margin-top:8px"><button class="btn sm ghost" data-action="switch-user" type="button">Cambiar</button></div>
       `;
 
       document.querySelectorAll('.nav-item').forEach((btn) => {
